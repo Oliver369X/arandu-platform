@@ -1,11 +1,12 @@
 import { CoursePlayer } from "@/components/pages/course-player"
 
 interface CoursePageProps {
-  params: {
+  params: Promise<{
     id: string
-  }
+  }>
 }
 
-export default function CoursePage({ params }: CoursePageProps) {
-  return <CoursePlayer courseId={params.id} />
+export default async function CoursePage({ params }: CoursePageProps) {
+  const { id } = await params
+  return <CoursePlayer courseId={id} />
 }

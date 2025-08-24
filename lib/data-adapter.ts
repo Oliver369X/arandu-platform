@@ -1,12 +1,16 @@
 // Adaptador de datos para convertir entre SchoolAI y ARANDU
 import type { Subject, Subtopic, Progress, User, ClassAssignment, AIFeedback } from './api';
 
+// Re-export AIFeedback for use in components
+export type { AIFeedback };
+
 // Interfaces de ARANDU (frontend)
 export interface Course {
   id: string;
   title: string;
   description: string;
   category: string;
+  difficulty?: string;
   level: "Principiante" | "Intermedio" | "Avanzado";
   instructor: {
     name: string;
@@ -16,9 +20,13 @@ export interface Course {
   price: number;
   rating: number;
   studentsCount: number;
+  totalStudents?: number;
   duration: number;
   modules: Module[];
   thumbnail: string;
+  progress?: number;
+  completedLessons?: number;
+  totalLessons?: number;
   createdAt: string;
   updatedAt: string;
 }

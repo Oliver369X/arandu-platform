@@ -90,6 +90,7 @@ export interface AIFeedback {
   timeAllocation: string;
   materialsNeeded?: string;
   successIndicator?: string;
+  status?: boolean;
   createdAt: string;
   updatedAt: string;
 }

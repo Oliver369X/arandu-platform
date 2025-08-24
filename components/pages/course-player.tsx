@@ -5,7 +5,7 @@ import { useAuth } from "@/hooks/use-auth"
 import { courseService } from "@/lib/course-service"
 import { aiService } from "@/lib/ai-service"
 import { apiService } from "@/lib/api"
-import type { Course, CourseProgress } from "@/lib/data-adapter"
+import type { Course, CourseProgress, AIFeedback } from "@/lib/data-adapter"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -13,6 +13,7 @@ import { Progress } from "@/components/ui/progress"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Separator } from "@/components/ui/separator"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { Checkbox } from "@/components/ui/checkbox"
 import {
   Play,
   Pause,
@@ -33,6 +34,8 @@ import {
   Target,
   Lightbulb,
   Loader2,
+  CheckSquare,
+  Square,
 } from "lucide-react"
 import Link from "next/link"
 
@@ -51,6 +54,9 @@ export function CoursePlayer({ courseId }: CoursePlayerProps) {
   const [isLoading, setIsLoading] = useState(true)
   const [aiContent, setAiContent] = useState<any>(null)
   const [isGeneratingContent, setIsGeneratingContent] = useState(false)
+  const [aiFeedbackSteps, setAiFeedbackSteps] = useState<AIFeedback[]>([])
+  const [isLoadingFeedback, setIsLoadingFeedback] = useState(false)
+  const [updatingStatus, setUpdatingStatus] = useState<string | null>(null)
   
   // Mock resources data
   const resources = [
@@ -71,6 +77,63 @@ export function CoursePlayer({ courseId }: CoursePlayerProps) {
     }
   ]
 
+  const generateAIContent = async (moduleId: string) => {
+    try {
+      setIsGeneratingContent(true)
+      const content = await aiService.generateEducationalContent(moduleId)
+      setAiContent(content)
+    } catch (error) {
+      console.error('Error generating AI content:', error)
+    } finally {
+      setIsGeneratingContent(false)
+    }
+  }
+
+  const loadAIContent = async (moduleId: string) => {
+    try {
+      // First try to get existing AI feedback and convert it to content
+      const existingFeedback = await aiService.getAIFeedbackBySubtopic(moduleId)
+      
+      if (existingFeedback.length > 0) {
+        // Convert existing AI feedback to content format
+        const content = {
+          content: existingFeedback.map(step => step.content).join('\n\n'),
+          summary: existingFeedback[0]?.content.substring(0, 200) + '...' || '',
+          keyPoints: existingFeedback
+            .map(step => step.successIndicator)
+            .filter(Boolean)
+            .slice(0, 5),
+          examples: existingFeedback
+            .map(step => step.studentActivity)
+            .filter(Boolean)
+            .slice(0, 3)
+        }
+        setAiContent(content)
+        return
+      }
+      
+      // If no existing feedback, generate new content
+      await generateAIContent(moduleId)
+    } catch (error) {
+      console.error('Error loading AI content:', error)
+    }
+  }
+
+  const fetchAIFeedbackSteps = async (moduleId: string) => {
+    try {
+      setIsLoadingFeedback(true)
+      const feedbackSteps = await aiService.getAIFeedbackBySubtopic(moduleId)
+      setAiFeedbackSteps(feedbackSteps)
+      return feedbackSteps
+    } catch (error) {
+      console.error('Error fetching AI feedback steps:', error)
+      setAiFeedbackSteps([])
+      return []
+    } finally {
+      setIsLoadingFeedback(false)
+    }
+  }
+
   useEffect(() => {
     const fetchCourseData = async () => {
       if (!courseId || !user?.id) return
@@ -88,9 +151,15 @@ export function CoursePlayer({ courseId }: CoursePlayerProps) {
           if (courseModulesResponse.success && courseModulesResponse.data) {
             setLessons(courseModulesResponse.data)
             
-            // Generate AI content for the current lesson
+            // Load AI content and feedback for the current lesson
             if (courseModulesResponse.data.length > 0) {
-              await generateAIContent(courseModulesResponse.data[0].id)
+              const firstLessonId = courseModulesResponse.data[0].id
+              
+              // Load both AI feedback steps and content
+              await Promise.all([
+                fetchAIFeedbackSteps(firstLessonId),
+                loadAIContent(firstLessonId)
+              ])
             }
           } else {
             console.error('Error fetching course modules:', courseModulesResponse.error)
@@ -104,7 +173,8 @@ export function CoursePlayer({ courseId }: CoursePlayerProps) {
         }
         
         // Fetch user progress
-        const progress = await courseService.getUserProgress(user.id, courseId)
+        const progressArray = await courseService.getUserProgress(user.id)
+        const progress = progressArray.find(p => p.courseId === courseId) || null
         setUserProgress(progress)
         
       } catch (error) {
@@ -114,20 +184,54 @@ export function CoursePlayer({ courseId }: CoursePlayerProps) {
       }
     }
 
-    const generateAIContent = async (moduleId: string) => {
-      try {
-        setIsGeneratingContent(true)
-        const content = await aiService.generateEducationalContent(moduleId)
-        setAiContent(content)
-      } catch (error) {
-        console.error('Error generating AI content:', error)
-      } finally {
-        setIsGeneratingContent(false)
-      }
-    }
-
     fetchCourseData()
   }, [courseId, user?.id])
+
+  const handleStatusUpdate = async (stepId: string, newStatus: boolean) => {
+    try {
+      setUpdatingStatus(stepId)
+      
+      // Find the current step to get all required data
+      const currentStep = aiFeedbackSteps.find(step => step.id === stepId)
+      if (!currentStep) {
+        console.error('Step not found:', stepId)
+        return
+      }
+
+      // Prepare the update data with all required fields
+      const updateData = {
+        id: currentStep.id,
+        subtopicId: currentStep.subtopicId,
+        timeMinutes: currentStep.timeMinutes,
+        stepNumber: currentStep.stepNumber,
+        stepName: currentStep.stepName,
+        content: currentStep.content,
+        studentActivity: currentStep.studentActivity,
+        timeAllocation: currentStep.timeAllocation,
+        materialsNeeded: currentStep.materialsNeeded,
+        successIndicator: currentStep.successIndicator,
+        status: newStatus
+      }
+
+      // Update the step
+      const updatedStep = await aiService.updateAIFeedbackStep(stepId, updateData)
+      
+      if (updatedStep) {
+        // Update local state
+        setAiFeedbackSteps(prev => 
+          prev.map(step => 
+            step.id === stepId 
+              ? { ...step, status: newStatus }
+              : step
+          )
+        )
+      }
+    } catch (error) {
+      console.error('Error updating step status:', error)
+    } finally {
+      setUpdatingStatus(null)
+    }
+  }
 
   if (isLoading) {
     return (
@@ -195,7 +299,7 @@ export function CoursePlayer({ courseId }: CoursePlayerProps) {
             </Button>
             <div className="flex items-center gap-4">
               <Badge variant="secondary">{courseData.category}</Badge>
-              <Badge variant="outline">{courseData.difficulty}</Badge>
+              <Badge variant="outline">{courseData.difficulty || 'Intermedio'}</Badge>
             </div>
           </div>
 
@@ -203,15 +307,15 @@ export function CoursePlayer({ courseId }: CoursePlayerProps) {
             <div>
               <h1 className="text-2xl font-poppins font-bold text-foreground mb-2">{courseData.title}</h1>
               <p className="text-muted-foreground">
-                Por {courseData.instructor?.name || 'Instructor'} • {courseData.completedLessons}/{courseData.totalLessons} lecciones
+                Por {courseData.instructor?.name || 'Instructor'} • {userProgress?.completedModulesCount || 0}/{lessons.length} lecciones
                 completadas
               </p>
             </div>
             <div className="text-right">
               <div className="text-sm text-muted-foreground mb-1">Progreso del curso</div>
               <div className="flex items-center gap-2">
-                <Progress value={courseData.progress} className="w-32" />
-                <span className="text-sm font-medium">{courseData.progress}%</span>
+                <Progress value={courseData.progress || 0} className="w-32" />
+                <span className="text-sm font-medium">{courseData.progress || 0}%</span>
               </div>
             </div>
           </div>
@@ -279,9 +383,10 @@ export function CoursePlayer({ courseId }: CoursePlayerProps) {
 
             {/* Lesson Content Tabs */}
             <Tabs value={activeTab} onValueChange={setActiveTab}>
-              <TabsList className="grid w-full grid-cols-5">
+              <TabsList className="grid w-full grid-cols-6">
                 <TabsTrigger value="overview">Resumen</TabsTrigger>
                 <TabsTrigger value="ai-content">Contenido IA</TabsTrigger>
+                <TabsTrigger value="ai-feedback">Plan de Lección</TabsTrigger>
                 <TabsTrigger value="notes">Notas</TabsTrigger>
                 <TabsTrigger value="resources">Recursos</TabsTrigger>
                 <TabsTrigger value="discussion">Discusión</TabsTrigger>
@@ -290,8 +395,8 @@ export function CoursePlayer({ courseId }: CoursePlayerProps) {
               <TabsContent value="overview" className="mt-6">
                 <Card>
                   <CardHeader>
-                                      <CardTitle>{currentLessonData?.title || 'Lección no disponible'}</CardTitle>
-                  <CardDescription>{currentLessonData?.description || 'Descripción no disponible'}</CardDescription>
+                    <CardTitle>{currentLessonData?.title || 'Lección no disponible'}</CardTitle>
+                    <CardDescription>{currentLessonData?.description || 'Descripción no disponible'}</CardDescription>
                   </CardHeader>
                   <CardContent>
                     <div className="space-y-4">
@@ -302,11 +407,11 @@ export function CoursePlayer({ courseId }: CoursePlayerProps) {
                         </div>
                         <div className="flex items-center gap-1">
                           <Users className="h-4 w-4" />
-                          {courseData.totalStudents} estudiantes
+                          {courseData.totalStudents || 0} estudiantes
                         </div>
                         <div className="flex items-center gap-1">
                           <Star className="h-4 w-4 fill-current text-yellow-500" />
-                          {courseData.rating}
+                          {courseData.rating || 0}
                         </div>
                       </div>
 
@@ -431,10 +536,144 @@ export function CoursePlayer({ courseId }: CoursePlayerProps) {
                         <p className="text-muted-foreground mb-4">
                           Haz clic en el botón para generar contenido personalizado con IA
                         </p>
-                        <Button onClick={() => currentLessonData?.id && generateAIContent(currentLessonData.id)}>
+                        <Button onClick={() => currentLessonData?.id && loadAIContent(currentLessonData.id)}>
                           <Brain className="h-4 w-4 mr-2" />
-                          Generar Contenido IA
+                          Cargar Contenido IA
                         </Button>
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              </TabsContent>
+
+              <TabsContent value="ai-feedback" className="mt-6">
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                      <Target className="h-5 w-5 text-primary" />
+                      Plan de Lección IA
+                    </CardTitle>
+                    <CardDescription>Pasos detallados del plan de lección generado por IA</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    {isLoadingFeedback ? (
+                      <div className="flex items-center justify-center py-8">
+                        <div className="flex items-center space-x-2">
+                          <Loader2 className="h-6 w-6 animate-spin" />
+                          <span>Cargando plan de lección...</span>
+                        </div>
+                      </div>
+                    ) : aiFeedbackSteps.length > 0 ? (
+                      <div className="space-y-6">
+                        {aiFeedbackSteps.map((step) => (
+                          <div key={step.id} className="border rounded-lg p-4">
+                            <div className="flex items-start justify-between mb-3">
+                              <div className="flex items-center gap-3">
+                                <div className="flex items-center gap-2">
+                                  <Checkbox
+                                    checked={step.status || false}
+                                    onCheckedChange={(checked) => 
+                                      handleStatusUpdate(step.id, checked as boolean)
+                                    }
+                                    disabled={updatingStatus === step.id}
+                                  />
+                                  {updatingStatus === step.id && (
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                  )}
+                                </div>
+                                <div>
+                                  <h3 className="font-semibold text-lg">
+                                    Paso {step.stepNumber}: {step.stepName}
+                                  </h3>
+                                  <div className="flex items-center gap-4 text-sm text-muted-foreground mt-1">
+                                    <span className="flex items-center gap-1">
+                                      <Clock className="h-3 w-3" />
+                                      {step.timeMinutes} minutos
+                                    </span>
+                                    <Badge variant={step.status ? "default" : "secondary"}>
+                                      {step.status ? "Completado" : "Pendiente"}
+                                    </Badge>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="space-y-4">
+                              {/* Content */}
+                              <div>
+                                <h4 className="font-medium mb-2 text-sm text-muted-foreground">Contenido:</h4>
+                                <p className="text-sm leading-relaxed">{step.content}</p>
+                              </div>
+
+                              {/* Student Activity */}
+                              {step.studentActivity && (
+                                <div>
+                                  <h4 className="font-medium mb-2 text-sm text-muted-foreground">Actividad del Estudiante:</h4>
+                                  <p className="text-sm leading-relaxed">{step.studentActivity}</p>
+                                </div>
+                              )}
+
+                              {/* Time Allocation */}
+                              <div>
+                                <h4 className="font-medium mb-2 text-sm text-muted-foreground">Distribución de Tiempo:</h4>
+                                <p className="text-sm leading-relaxed">{step.timeAllocation}</p>
+                              </div>
+
+                              {/* Materials Needed */}
+                              {step.materialsNeeded && (
+                                <div>
+                                  <h4 className="font-medium mb-2 text-sm text-muted-foreground">Materiales Necesarios:</h4>
+                                  <p className="text-sm leading-relaxed">{step.materialsNeeded}</p>
+                                </div>
+                              )}
+
+                              {/* Success Indicator */}
+                              {step.successIndicator && (
+                                <div>
+                                  <h4 className="font-medium mb-2 text-sm text-muted-foreground">Indicador de Éxito:</h4>
+                                  <p className="text-sm leading-relaxed">{step.successIndicator}</p>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+
+                        {/* Summary */}
+                        <div className="bg-muted/50 p-4 rounded-lg">
+                          <h3 className="font-semibold mb-2">Resumen del Plan</h3>
+                          <div className="grid grid-cols-2 gap-4 text-sm">
+                            <div>
+                              <span className="text-muted-foreground">Total de pasos:</span>
+                              <span className="ml-2 font-medium">{aiFeedbackSteps.length}</span>
+                            </div>
+                            <div>
+                              <span className="text-muted-foreground">Tiempo total:</span>
+                              <span className="ml-2 font-medium">
+                                {aiFeedbackSteps.reduce((sum, step) => sum + step.timeMinutes, 0)} minutos
+                              </span>
+                            </div>
+                            <div>
+                              <span className="text-muted-foreground">Pasos completados:</span>
+                              <span className="ml-2 font-medium">
+                                {aiFeedbackSteps.filter(step => step.status).length}
+                              </span>
+                            </div>
+                            <div>
+                              <span className="text-muted-foreground">Progreso:</span>
+                              <span className="ml-2 font-medium">
+                                {Math.round((aiFeedbackSteps.filter(step => step.status).length / aiFeedbackSteps.length) * 100)}%
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="text-center py-8">
+                        <Target className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
+                        <h3 className="font-semibold mb-2">No hay plan de lección disponible</h3>
+                        <p className="text-muted-foreground mb-4">
+                          El plan de lección para esta unidad aún no ha sido generado
+                        </p>
                       </div>
                     )}
                   </CardContent>
@@ -506,8 +745,7 @@ export function CoursePlayer({ courseId }: CoursePlayerProps) {
                               <span className="text-sm text-muted-foreground">hace 2 horas</span>
                             </div>
                             <p className="text-sm">
-                              Excelente explicación sobre las redes neuronales. ¿Podrían profundizar más en las
-                              funciones de activación?
+                              Excelente explicación.
                             </p>
                           </div>
                         </div>
@@ -527,8 +765,7 @@ export function CoursePlayer({ courseId }: CoursePlayerProps) {
                               <span className="text-sm text-muted-foreground">hace 1 hora</span>
                             </div>
                             <p className="text-sm">
-                              @Juan Díaz Excelente pregunta. En la próxima lección cubriremos las funciones de
-                              activación en detalle.
+                              @Juan Díaz Un gusto.
                             </p>
                           </div>
                         </div>
@@ -560,7 +797,7 @@ export function CoursePlayer({ courseId }: CoursePlayerProps) {
               <CardHeader>
                 <CardTitle className="text-lg">Contenido del Curso</CardTitle>
                 <CardDescription>
-                  {courseData.completedLessons} de {courseData.totalLessons} lecciones
+                  {userProgress?.completedModulesCount || 0} de {lessons.length} lecciones
                 </CardDescription>
               </CardHeader>
               <CardContent className="p-0">
@@ -576,7 +813,15 @@ export function CoursePlayer({ courseId }: CoursePlayerProps) {
                               ? "bg-muted hover:bg-muted/80"
                               : "hover:bg-muted/50"
                         }`}
-                        onClick={() => setCurrentLesson(index)}
+                        onClick={async () => {
+                          setCurrentLesson(index)
+                          if (lesson.id) {
+                            await Promise.all([
+                              fetchAIFeedbackSteps(lesson.id),
+                              loadAIContent(lesson.id)
+                            ])
+                          }
+                        }}
                       >
                         <div className="flex items-start gap-3">
                           <div className="flex-shrink-0 mt-1">
@@ -605,11 +850,44 @@ export function CoursePlayer({ courseId }: CoursePlayerProps) {
 
             {/* Navigation buttons */}
             <div className="mt-4 space-y-2">
-              <Button className="w-full" disabled={currentLesson === 0}>
+              <Button 
+                className="w-full" 
+                disabled={currentLesson === 0}
+                onClick={async () => {
+                  if (currentLesson > 0) {
+                    const newLessonIndex = currentLesson - 1
+                    setCurrentLesson(newLessonIndex)
+                    const lesson = lessons[newLessonIndex]
+                    if (lesson?.id) {
+                      await Promise.all([
+                        fetchAIFeedbackSteps(lesson.id),
+                        loadAIContent(lesson.id)
+                      ])
+                    }
+                  }
+                }}
+              >
                 <ArrowLeft className="h-4 w-4 mr-2" />
                 Lección Anterior
               </Button>
-              <Button className="w-full bg-transparent" variant="outline">
+              <Button 
+                className="w-full bg-transparent" 
+                variant="outline"
+                disabled={currentLesson === lessons.length - 1}
+                onClick={async () => {
+                  if (currentLesson < lessons.length - 1) {
+                    const newLessonIndex = currentLesson + 1
+                    setCurrentLesson(newLessonIndex)
+                    const lesson = lessons[newLessonIndex]
+                    if (lesson?.id) {
+                      await Promise.all([
+                        fetchAIFeedbackSteps(lesson.id),
+                        loadAIContent(lesson.id)
+                      ])
+                    }
+                  }
+                }}
+              >
                 <ArrowRight className="h-4 w-4 mr-2" />
                 Siguiente Lección
               </Button>
